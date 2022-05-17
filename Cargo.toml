@@ -1,0 +1,19 @@
+[package]
+name = "eguigreeter"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+crossterm = "0.23.2"
+egui = "0.18.1"
+egui_glium = "0.18.0"
+freedesktop-desktop-entry = "0.5.0"
+glium = "0.31.0"
+greetd_ipc = { version = "0.8.0", features = ["sync-codec"] }
+image = "0.24.2"
+
+[patch.crates-io]
+winit = { git = "https://github.com/StratusFearMe21/winit" }
+glutin = { git = "https://github.com/StratusFearMe21/glutin" }
