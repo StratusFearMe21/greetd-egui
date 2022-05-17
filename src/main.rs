@@ -5,9 +5,10 @@ use std::{
         net::UnixStream,
         prelude::{AsRawFd, FromRawFd},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
+use clap::Arg;
 use egui::{Align2, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
 use greetd_ipc::{codec::SyncCodec, AuthMessageType, Response};
@@ -18,6 +19,7 @@ use glium::glutin::{
     event_loop::ControlFlow,
     platform::{run_return::EventLoopExtRunReturn, unix::EventLoopWindowTargetExtUnix},
 };
+use rand::prelude::IteratorRandom;
 
 #[derive(PartialEq)]
 struct StrippedEntry<'a> {
@@ -26,6 +28,20 @@ struct StrippedEntry<'a> {
 }
 
 fn main() {
+    let command = clap::Command::new("eguigreeter")
+        .args(&[
+            Arg::new("background")
+                .long("background")
+                .short('b')
+                .value_hint(clap::ValueHint::AnyPath)
+                .help("Sets the background picture on the lock screen"),
+            Arg::new("username")
+                .long("username")
+                .short('u')
+                .value_hint(clap::ValueHint::Username)
+                .help("Autofill your own username on a single user computer"),
+        ])
+        .get_matches();
     let mut event_loop: glutin::event_loop::EventLoop<char> =
         glutin::event_loop::EventLoopBuilder::with_user_event().build();
     let context_builder = glutin::ContextBuilder::new().with_vsync(true);
@@ -41,14 +57,30 @@ fn main() {
 
     let img = || -> Option<_> {
         let size = display.gl_window().window().inner_size();
-        let image = image::open("/etc/greetd/background.png")
-            .ok()?
-            .resize(
-                size.width,
-                size.height,
-                image::imageops::FilterType::Lanczos3,
+        let path = Path::new(
+            command
+                .value_of("background")
+                .unwrap_or("/etc/greetd/background.png"),
+        );
+        let image = if path.is_dir() {
+            image::open(
+                std::fs::read_dir(path)
+                    .ok()?
+                    .choose(&mut rand::rngs::OsRng)?
+                    .ok()?
+                    .path(),
             )
-            .to_rgba8();
+            .ok()?
+        } else {
+            image::open(path).ok()?
+        }
+        .resize_exact(
+            size.width,
+            size.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+
         let image_dimensions = image.dimensions();
         let pixels: Vec<_> = image
             .into_vec()
@@ -75,8 +107,8 @@ fn main() {
     let mut focused = FocusedField::Username;
     let mut username = String::new();
 
-    if let Some(defaults) = std::env::args().nth(1) {
-        username = defaults;
+    if let Some(defaults) = command.value_of("username") {
+        username = defaults.to_string();
         let len: u32 =
             ("{\"type\":\"create_session\",\"username\":\"\"}".len() + username.len()) as u32;
         stream.write_all(&len.to_ne_bytes()).unwrap();
@@ -334,13 +366,15 @@ fn main() {
     }
     stream
         .write_all(
-            &("{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"dwl\"]}".len() as u32)
+            &(("{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"\"]}".len()
+                + current_env.exec.len()) as u32)
                 .to_ne_bytes(),
         )
         .unwrap();
     stream
         .write_fmt(format_args!(
-            "{{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"dwl\"]}}"
+            "{{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"{}\"]}}",
+            current_env.exec
         ))
         .unwrap();
     if let Response::Success = Response::read_from(&mut stream).unwrap() {
