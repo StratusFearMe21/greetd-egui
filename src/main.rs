@@ -9,9 +9,9 @@ use std::{
 };
 
 use clap::Arg;
-use egui::{Align2, TextEdit};
+use egui::{Align2, Frame, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
-use greetd_ipc::{codec::SyncCodec, AuthMessageType, Response};
+use greetd_ipc::{codec::SyncCodec, AuthMessageType, ErrorType, Response};
 
 use glium::glutin::{
     self,
@@ -164,6 +164,7 @@ fn main() {
     let mut auth_message = String::new();
     let mut auth_message_type: Option<AuthMessageType> = None;
     let mut password = String::new();
+    let mut window_title = Cow::Borrowed("Login");
     let mut card_fd = None;
     event_loop.run_return(|event, target, control_flow| {
         if pending_message {
@@ -174,28 +175,58 @@ fn main() {
                 } => {
                     auth_message = am;
                     auth_message_type = Some(at);
+                    pending_message = false;
                 }
                 Response::Success => {
                     if let Some(drm) = target.drm_device() {
                         card_fd = Some(drm.as_raw_fd());
                     }
                     *control_flow = ControlFlow::Exit;
+                    pending_message = false;
                 }
-                r => unimplemented!("{:?}", r),
+                Response::Error {
+                    error_type,
+                    description,
+                } => match error_type {
+                    ErrorType::Error => window_title = Cow::Owned(description),
+                    ErrorType::AuthError => {
+                        stream =
+                            UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap();
+                        focused = FocusedField::Username;
+                        username.clear();
+                        password.clear();
+
+                        if let Some(defaults) = command.value_of("username") {
+                            username = defaults.to_string();
+                            let len: u32 = ("{\"type\":\"create_session\",\"username\":\"\"}".len()
+                                + username.len()) as u32;
+                            stream.write_all(&len.to_ne_bytes()).unwrap();
+                            stream
+                                .write_fmt(format_args!(
+                                    "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
+                                    username
+                                ))
+                                .unwrap();
+                            pending_message = true;
+                            focused = FocusedField::Password;
+                        } else {
+                            pending_message = false;
+                        }
+                    }
+                },
             }
-            pending_message = false;
         }
         match event {
             glutin::event::Event::RedrawRequested(_) => {
                 let needs_repaint = egui_glium.run(&display, |ctx| {
                     if let Some(img) = img {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            ui.centered_and_justified(|ui| {
+                        egui::CentralPanel::default()
+                            .frame(Frame::none())
+                            .show(ctx, |ui| {
                                 ui.image(img.0, img.1);
                             });
-                        });
                     }
-                    egui::Window::new("Login")
+                    egui::Window::new(window_title.as_ref())
                         .auto_sized()
                         .collapsible(false)
                         .anchor(Align2::CENTER_CENTER, (0.0, 0.0))
@@ -224,7 +255,21 @@ fn main() {
                                     Some(AuthMessageType::Secret) => {
                                         ui.add(TextEdit::singleline(&mut password).password(true))
                                     }
-                                    _ => return,
+                                    Some(_) => {
+                                        stream
+                                            .write_all(
+                                                &("{\"type\":\"post_auth_message_response\"}".len()
+                                                    as u32)
+                                                    .to_ne_bytes(),
+                                            )
+                                            .unwrap();
+                                        stream
+                                            .write_all(b"{\"type\":\"post_auth_message_response\"}")
+                                            .unwrap();
+                                        pending_message = true;
+                                        return;
+                                    }
+                                    None => return,
                                 };
                                 if pending_focus {
                                     if let FocusedField::Password = focused {
