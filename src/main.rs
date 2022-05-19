@@ -255,6 +255,11 @@ fn main() {
                 } => match error_type {
                     ErrorType::Error => window_title = Cow::Owned(description),
                     ErrorType::AuthError => {
+                        window_title = Cow::Borrowed("Login failed");
+                        let len: u32 = "{\"type\":\"cancel_session\"}".len() as u32;
+                        stream.write_all(&len.to_ne_bytes()).unwrap();
+                        stream.write_all(b"{\"type\":\"cancel_session\"}").unwrap();
+                        pending_message = true;
                         stream =
                             UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap();
                         focused = FocusedField::Username;
@@ -272,10 +277,7 @@ fn main() {
                                     username
                                 ))
                                 .unwrap();
-                            pending_message = true;
                             focused = FocusedField::Password;
-                        } else {
-                            pending_message = false;
                         }
                     }
                 },
