@@ -9,13 +9,16 @@ edition = "2021"
 clap = "3.1.18"
 crossterm = "0.23.2"
 egui = "0.18.1"
-egui_glium = "0.18.0"
+egui_glow = { version = "0.18.1", features = ["winit"] }
 freedesktop-desktop-entry = "0.5.0"
-glium = "0.31.0"
+glow = "0.11.2"
 greetd_ipc = { version = "0.8.0", features = ["sync-codec"] }
-image = "0.24.2"
 rand = "0.8.5"
+glutin = { git = "https://github.com/StratusFearMe21/glutin" }
+libmpv = { git = "https://github.com/StratusFearMe21/libmpv-rs" }
+infer = "0.8.0"
 
 [patch.crates-io]
 winit = { git = "https://github.com/StratusFearMe21/winit" }
-glutin = { git = "https://github.com/StratusFearMe21/glutin" }
+
+[features]

@@ -1,11 +1,13 @@
 use std::{
     borrow::Cow,
+    ffi::c_void,
     io::{Read, Write},
     os::unix::{
         net::UnixStream,
         prelude::{AsRawFd, FromRawFd},
     },
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use clap::Arg;
@@ -13,11 +15,17 @@ use egui::{Align2, Frame, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
 use greetd_ipc::{codec::SyncCodec, AuthMessageType, ErrorType, Response};
 
-use glium::glutin::{
-    self,
+use glutin::{
     event::{DeviceId, ModifiersState, VirtualKeyCode},
     event_loop::ControlFlow,
     platform::{run_return::EventLoopExtRunReturn, unix::EventLoopWindowTargetExtUnix},
+    window::Window,
+    ContextWrapper, PossiblyCurrent,
+};
+use infer::MatcherType;
+use libmpv::{
+    render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType},
+    FileState, Mpv,
 };
 use rand::prelude::IteratorRandom;
 
@@ -25,6 +33,19 @@ use rand::prelude::IteratorRandom;
 struct StrippedEntry<'a> {
     name: Cow<'a, str>,
     exec: &'a str,
+}
+
+#[derive(Debug)]
+enum UserEvent {
+    Char(char),
+    Redraw,
+}
+
+pub fn get_proc_address(
+    display: &Rc<ContextWrapper<PossiblyCurrent, Window>>,
+    name: &str,
+) -> *mut c_void {
+    display.get_proc_address(name) as *mut c_void
 }
 
 fn main() {
@@ -47,63 +68,83 @@ fn main() {
                 .help("Sets the default session for this login"),
         ])
         .get_matches();
-    let mut event_loop: glutin::event_loop::EventLoop<char> =
+    let mut event_loop: glutin::event_loop::EventLoop<UserEvent> =
         glutin::event_loop::EventLoopBuilder::with_user_event().build();
-    let context_builder = glutin::ContextBuilder::new().with_vsync(true);
-
-    let display = glium::Display::new(
-        glutin::window::WindowBuilder::new(),
-        context_builder,
-        &event_loop,
-    )
-    .unwrap();
-
-    let mut egui_glium = egui_glium::EguiGlium::new(&display);
-
-    let img = || -> Option<_> {
-        let size = display.gl_window().window().inner_size();
-        let path = Path::new(
-            command
-                .value_of("background")
-                .unwrap_or("/etc/greetd/background.png"),
-        );
-        let image = if path.is_dir() {
-            image::open(
-                std::fs::read_dir(path)
-                    .ok()?
-                    .choose(&mut rand::rngs::OsRng)?
-                    .ok()?
-                    .path(),
-            )
-            .ok()?
-        } else {
-            image::open(path).ok()?
-        }
-        .resize_exact(
-            size.width,
-            size.height,
-            image::imageops::FilterType::Lanczos3,
+    let display = unsafe {
+        Rc::new(
+            glutin::ContextBuilder::new()
+                .with_vsync(true)
+                .build_windowed(
+                    glutin::window::WindowBuilder::new().with_resizable(true),
+                    &event_loop,
+                )
+                .unwrap()
+                .make_current()
+                .unwrap(),
         )
-        .to_rgba8();
+    };
+    let mut size = display.window().inner_size();
 
-        let image_dimensions = image.dimensions();
-        let pixels: Vec<_> = image
-            .into_vec()
-            .chunks_exact(4)
-            .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-            .flat_map(|color| color.to_array())
-            .collect();
+    let gl = unsafe {
+        Rc::new(glow::Context::from_loader_function(|c| {
+            display.get_proc_address(c)
+        }))
+    };
 
-        let texture = glium::texture::RawImage2d::from_raw_rgba(pixels, image_dimensions);
-        let egui_dimensions = egui::Vec2::new(texture.width as f32, texture.height as f32);
-        let glium_texture =
-            glium::texture::srgb_texture2d::SrgbTexture2d::new(&display, texture).ok()?;
-        let glium_texture = std::rc::Rc::new(glium_texture);
+    let mut egui_glow = egui_glow::EguiGlow::new(display.window(), gl.clone());
 
-        Some((
-            egui_glium.painter.register_native_texture(glium_texture),
-            egui_dimensions,
-        ))
+    let mut vid = || -> Option<(Option<RenderContext>, Mpv)> {
+        let mut path = command.value_of("background")?.to_string();
+
+        if Path::new(&path).is_dir() {
+            path = std::fs::read_dir(path)
+                .ok()?
+                .choose(&mut rand::rngs::OsRng)?
+                .ok()?
+                .path()
+                .to_str()?
+                .to_string();
+        } else if !Path::new(&path).exists() {
+            return None;
+        }
+
+        let is_image = if let Some(mime) = infer::Infer::new().get_from_path(&path).ok()? {
+            mime.matcher_type() == MatcherType::Image
+        } else {
+            false
+        };
+
+        let mut mpv = Mpv::with_initializer(|f| {
+            if is_image {
+                f.set_property("keep-open", true)?;
+            } else {
+                f.set_property("audio", false)?;
+                f.set_property("hwdec", "auto-safe")?;
+                f.set_property("loop-file", true)?;
+            }
+            f.set_property("panscan", 1.0)
+        })
+        .ok()?;
+        let mut render_context = RenderContext::new(
+            unsafe { mpv.ctx.as_mut() },
+            vec![
+                RenderParam::ApiType(RenderParamApiType::OpenGl),
+                RenderParam::InitParams(OpenGLInitParams {
+                    get_proc_address,
+                    ctx: display.clone(),
+                }),
+            ],
+        )
+        .ok()?;
+        mpv.event_context_mut().disable_deprecated_events().unwrap();
+        let event_proxy = event_loop.create_proxy();
+        render_context.set_update_callback(move || {
+            event_proxy.send_event(UserEvent::Redraw).unwrap();
+        });
+        mpv.playlist_load_files(&[(&path, FileState::AppendPlay, None)])
+            .unwrap();
+
+        Some((Some(render_context), mpv))
     }();
 
     let mut stream = UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap();
@@ -140,7 +181,7 @@ fn main() {
                     crossterm::terminal::disable_raw_mode().unwrap();
                     std::process::exit(1);
                 }
-                proxy.send_event(b[0] as char).unwrap();
+                proxy.send_event(UserEvent::Char(b[0] as char)).unwrap();
             }
         }
     });
@@ -230,15 +271,14 @@ fn main() {
             }
         }
         match event {
+            glutin::event::Event::LoopDestroyed => {
+                egui_glow.destroy();
+                if let Some(v) = &mut vid {
+                    v.0.take();
+                }
+            }
             glutin::event::Event::RedrawRequested(_) => {
-                let needs_repaint = egui_glium.run(&display, |ctx| {
-                    if let Some(img) = img {
-                        egui::CentralPanel::default()
-                            .frame(Frame::none())
-                            .show(ctx, |ui| {
-                                ui.image(img.0, img.1);
-                            });
-                    }
+                let needs_repaint = egui_glow.run(display.window(), |ctx| {
                     egui::Window::new(window_title.as_ref())
                         .auto_sized()
                         .collapsible(false)
@@ -297,7 +337,7 @@ fn main() {
                 });
 
                 *control_flow = if needs_repaint {
-                    display.gl_window().window().request_redraw();
+                    display.window().request_redraw();
                     ControlFlow::Poll
                 } else if *control_flow != ControlFlow::Exit {
                     ControlFlow::Wait
@@ -306,22 +346,33 @@ fn main() {
                 };
 
                 {
-                    use glium::Surface as _;
-                    let mut target = display.draw();
-
-                    if img.is_none() {
-                        let color = egui::Rgba::from_rgb(0.1, 0.3, 0.2);
-                        target.clear_color(color[0], color[1], color[2], color[3]);
+                    unsafe {
+                        use glow::HasContext as _;
+                        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                        gl.clear(glow::COLOR_BUFFER_BIT);
                     }
 
-                    egui_glium.paint(&display, &mut target);
+                    if let Some(vi) = &vid {
+                        if let Some(render_context) = &vi.0 {
+                            render_context
+                                .render::<ContextWrapper<PossiblyCurrent, Window>>(
+                                    0,
+                                    size.width as _,
+                                    size.height as _,
+                                    true,
+                                )
+                                .expect("Failed to draw on glutin window");
+                        }
+                    }
 
-                    target.finish().unwrap();
+                    egui_glow.paint(display.window());
+
+                    display.swap_buffers().unwrap();
                 }
             }
             glutin::event::Event::UserEvent(c) => {
                 match c {
-                    '\r' => match focused {
+                    UserEvent::Char('\r') => match focused {
                         FocusedField::Password => {
                             if username.is_empty() {
                                 focused = FocusedField::Username;
@@ -362,14 +413,14 @@ fn main() {
                             pending_focus = true;
                         }
                     },
-                    '\t' => {
+                    UserEvent::Char('\t') => {
                         match focused {
                             FocusedField::Username => focused = FocusedField::Password,
                             FocusedField::Password => focused = FocusedField::Username,
                         }
                         pending_focus = true;
                     }
-                    '>' => {
+                    UserEvent::Char('>') => {
                         current_env_index += 1;
                         if let Some(env) = environments.get(current_env_index) {
                             current_env = env
@@ -378,7 +429,7 @@ fn main() {
                             current_env = &environments[current_env_index];
                         }
                     }
-                    '<' => {
+                    UserEvent::Char('<') => {
                         current_env_index -= 1;
                         if let Some(env) = environments.get(current_env_index) {
                             current_env = env
@@ -387,8 +438,8 @@ fn main() {
                             current_env = &environments[current_env_index];
                         }
                     }
-                    '\x7F' => {
-                        egui_glium.on_event(&glutin::event::WindowEvent::KeyboardInput {
+                    UserEvent::Char('\x7F') => {
+                        egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
                             device_id: unsafe { DeviceId::dummy() },
                             input: glutin::event::KeyboardInput {
                                 scancode: b'\x7F' as u32,
@@ -398,7 +449,7 @@ fn main() {
                             },
                             is_synthetic: false,
                         });
-                        egui_glium.on_event(&glutin::event::WindowEvent::KeyboardInput {
+                        egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
                             device_id: unsafe { DeviceId::dummy() },
                             input: glutin::event::KeyboardInput {
                                 scancode: b'\x7F' as u32,
@@ -409,12 +460,13 @@ fn main() {
                             is_synthetic: false,
                         });
                     }
-                    c => {
-                        egui_glium.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
+                    UserEvent::Char(c) => {
+                        egui_glow.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
                     }
+                    UserEvent::Redraw => {}
                 }
 
-                display.gl_window().window().request_redraw();
+                display.window().request_redraw();
             }
             glutin::event::Event::WindowEvent { event, .. } => {
                 use glutin::event::WindowEvent;
@@ -422,16 +474,28 @@ fn main() {
                     *control_flow = glutin::event_loop::ControlFlow::Exit;
                 }
 
-                egui_glium.on_event(&event);
+                if let glutin::event::WindowEvent::Resized(physical_size) = &event {
+                    size = *physical_size;
+                    display.resize(*physical_size);
+                } else if let glutin::event::WindowEvent::ScaleFactorChanged {
+                    new_inner_size,
+                    ..
+                } = &event
+                {
+                    size = **new_inner_size;
+                    display.resize(**new_inner_size);
+                }
 
-                display.gl_window().window().request_redraw();
+                egui_glow.on_event(&event);
+
+                display.window().request_redraw();
             }
             _ => {}
         }
     });
     drop(event_loop);
     drop(display);
-    drop(egui_glium);
+    drop(egui_glow);
     if let Some(fd) = card_fd {
         drop(unsafe { std::fs::File::from_raw_fd(fd) });
     }
