@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     ffi::c_void,
-    io::{Read, Write},
+    io::{Read, Stdin, Write},
     os::unix::{
         net::UnixStream,
         prelude::{AsRawFd, FromRawFd},
@@ -10,8 +10,9 @@ use std::{
     rc::Rc,
 };
 
+use calloop::{Interest, PostAction};
 use clap::Arg;
-use egui::{Align2, Frame, TextEdit};
+use egui::{Align2, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
 use greetd_ipc::{codec::SyncCodec, AuthMessageType, ErrorType, Response};
 
@@ -19,7 +20,7 @@ use glutin::{
     event::{DeviceId, ModifiersState, VirtualKeyCode},
     event_loop::ControlFlow,
     platform::{run_return::EventLoopExtRunReturn, unix::EventLoopWindowTargetExtUnix},
-    window::Window,
+    window::{Window, WindowId},
     ContextWrapper, PossiblyCurrent,
 };
 use infer::MatcherType;
@@ -37,7 +38,6 @@ struct StrippedEntry<'a> {
 
 #[derive(Debug)]
 enum UserEvent {
-    Char(char),
     Redraw,
 }
 
@@ -170,21 +170,32 @@ fn main() {
 
     crossterm::terminal::enable_raw_mode().unwrap();
 
-    std::thread::spawn({
-        let proxy = event_loop.create_proxy();
-        move || {
-            let stdin = std::io::stdin();
-            let mut lock = stdin.lock();
-            let mut b = [0x00];
-            loop {
-                if let Err(_) = lock.read_exact(&mut b) {
+    if let Some(handle) = event_loop.drm_calloop_handle() {
+        let stdin_source =
+            calloop::generic::Generic::new(std::io::stdin(), Interest::READ, calloop::Mode::Level);
+
+        let stdin_dispatcher: calloop::Dispatcher<
+            'static,
+            calloop::generic::Generic<Stdin>,
+            Vec<glutin::event::Event<'static, ()>>,
+        > = calloop::Dispatcher::new(
+            stdin_source,
+            move |_, stdin, shared_data: &mut Vec<glutin::event::Event<'static, ()>>| {
+                let mut b = [0x00];
+                if let Err(_) = stdin.read_exact(&mut b) {
                     crossterm::terminal::disable_raw_mode().unwrap();
                     std::process::exit(1);
                 }
-                proxy.send_event(UserEvent::Char(b[0] as char)).unwrap();
-            }
-        }
-    });
+                shared_data.push(glutin::event::Event::WindowEvent {
+                    window_id: unsafe { WindowId::dummy() },
+                    event: glutin::event::WindowEvent::ReceivedCharacter(b[0] as char),
+                });
+                Ok(PostAction::Continue)
+            },
+        );
+
+        handle.register_dispatcher(stdin_dispatcher).unwrap();
+    }
 
     let environments_raw: Vec<(String, PathBuf)> = freedesktop_desktop_entry::Iter::new(vec![
         PathBuf::from("/usr/share/wayland-sessions"),
@@ -370,113 +381,21 @@ fn main() {
                     display.swap_buffers().unwrap();
                 }
             }
-            glutin::event::Event::UserEvent(c) => {
-                match c {
-                    UserEvent::Char('\r') => match focused {
-                        FocusedField::Password => {
-                            if username.is_empty() {
-                                focused = FocusedField::Username;
-                            } else {
-                                stream
-                                    .write_all(
-                                        &(("{\"type\":\"post_auth_message_response\",\"\
-                                                    response\":\"\"}"
-                                            .len()
-                                            + password.len())
-                                            as u32)
-                                            .to_ne_bytes(),
-                                    )
-                                    .unwrap();
-                                stream
-                                    .write_fmt(format_args!(
-                                        "{{\"type\":\"post_auth_message_response\",\"\
-                                                 response\":\"{}\"}}",
-                                        password
-                                    ))
-                                    .unwrap();
-                                pending_message = true;
-                            }
-                            pending_focus = true;
-                        }
-                        FocusedField::Username => {
-                            let len: u32 = ("{\"type\":\"create_session\",\"username\":\"\"}".len()
-                                + username.len()) as u32;
-                            stream.write_all(&len.to_ne_bytes()).unwrap();
-                            stream
-                                .write_fmt(format_args!(
-                                    "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
-                                    username
-                                ))
-                                .unwrap();
-                            focused = FocusedField::Password;
-                            pending_message = true;
-                            pending_focus = true;
-                        }
-                    },
-                    UserEvent::Char('\t') => {
-                        match focused {
-                            FocusedField::Username => focused = FocusedField::Password,
-                            FocusedField::Password => focused = FocusedField::Username,
-                        }
-                        pending_focus = true;
-                    }
-                    UserEvent::Char('>') => {
-                        current_env_index += 1;
-                        if let Some(env) = environments.get(current_env_index) {
-                            current_env = env
-                        } else {
-                            current_env_index = 0;
-                            current_env = &environments[current_env_index];
-                        }
-                    }
-                    UserEvent::Char('<') => {
-                        current_env_index -= 1;
-                        if let Some(env) = environments.get(current_env_index) {
-                            current_env = env
-                        } else {
-                            current_env_index = environments.len() - 1;
-                            current_env = &environments[current_env_index];
-                        }
-                    }
-                    UserEvent::Char('\x7F') => {
-                        egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
-                            device_id: unsafe { DeviceId::dummy() },
-                            input: glutin::event::KeyboardInput {
-                                scancode: b'\x7F' as u32,
-                                state: glutin::event::ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Back),
-                                modifiers: ModifiersState::empty(),
-                            },
-                            is_synthetic: false,
-                        });
-                        egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
-                            device_id: unsafe { DeviceId::dummy() },
-                            input: glutin::event::KeyboardInput {
-                                scancode: b'\x7F' as u32,
-                                state: glutin::event::ElementState::Released,
-                                virtual_keycode: Some(VirtualKeyCode::Back),
-                                modifiers: ModifiersState::empty(),
-                            },
-                            is_synthetic: false,
-                        });
-                    }
-                    UserEvent::Char(c) => {
-                        egui_glow.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
-                    }
-                    UserEvent::Redraw => {}
-                }
-
+            glutin::event::Event::UserEvent(_) => {
                 display.window().request_redraw();
             }
             glutin::event::Event::WindowEvent { event, .. } => {
                 use glutin::event::WindowEvent;
                 if matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed) {
                     *control_flow = glutin::event_loop::ControlFlow::Exit;
+
+                    egui_glow.on_event(&event);
                 }
 
                 if let glutin::event::WindowEvent::Resized(physical_size) = &event {
                     size = *physical_size;
                     display.resize(*physical_size);
+                    egui_glow.on_event(&event);
                 } else if let glutin::event::WindowEvent::ScaleFactorChanged {
                     new_inner_size,
                     ..
@@ -484,10 +403,106 @@ fn main() {
                 {
                     size = **new_inner_size;
                     display.resize(**new_inner_size);
+                    egui_glow.on_event(&event);
+                } else if let glutin::event::WindowEvent::ReceivedCharacter(c) = event {
+                    match c {
+                        '\r' => match focused {
+                            FocusedField::Password => {
+                                if username.is_empty() {
+                                    focused = FocusedField::Username;
+                                } else {
+                                    stream
+                                        .write_all(
+                                            &(("{\"type\":\"post_auth_message_response\",\"\
+                                                    response\":\"\"}"
+                                                .len()
+                                                + password.len())
+                                                as u32)
+                                                .to_ne_bytes(),
+                                        )
+                                        .unwrap();
+                                    stream
+                                        .write_fmt(format_args!(
+                                            "{{\"type\":\"post_auth_message_response\",\"\
+                                                 response\":\"{}\"}}",
+                                            password
+                                        ))
+                                        .unwrap();
+                                    pending_message = true;
+                                }
+                                pending_focus = true;
+                            }
+                            FocusedField::Username => {
+                                let len: u32 = ("{\"type\":\"create_session\",\"username\":\"\"}"
+                                    .len()
+                                    + username.len())
+                                    as u32;
+                                stream.write_all(&len.to_ne_bytes()).unwrap();
+                                stream
+                                    .write_fmt(format_args!(
+                                        "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
+                                        username
+                                    ))
+                                    .unwrap();
+                                focused = FocusedField::Password;
+                                pending_message = true;
+                                pending_focus = true;
+                            }
+                        },
+                        '\t' => {
+                            match focused {
+                                FocusedField::Username => focused = FocusedField::Password,
+                                FocusedField::Password => focused = FocusedField::Username,
+                            }
+                            pending_focus = true;
+                        }
+                        '>' => {
+                            current_env_index += 1;
+                            if let Some(env) = environments.get(current_env_index) {
+                                current_env = env
+                            } else {
+                                current_env_index = 0;
+                                current_env = &environments[current_env_index];
+                            }
+                        }
+                        '<' => {
+                            current_env_index -= 1;
+                            if let Some(env) = environments.get(current_env_index) {
+                                current_env = env
+                            } else {
+                                current_env_index = environments.len() - 1;
+                                current_env = &environments[current_env_index];
+                            }
+                        }
+                        '\x7F' => {
+                            egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
+                                device_id: unsafe { DeviceId::dummy() },
+                                input: glutin::event::KeyboardInput {
+                                    scancode: b'\x7F' as u32,
+                                    state: glutin::event::ElementState::Pressed,
+                                    virtual_keycode: Some(VirtualKeyCode::Back),
+                                    modifiers: ModifiersState::empty(),
+                                },
+                                is_synthetic: false,
+                            });
+                            egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
+                                device_id: unsafe { DeviceId::dummy() },
+                                input: glutin::event::KeyboardInput {
+                                    scancode: b'\x7F' as u32,
+                                    state: glutin::event::ElementState::Released,
+                                    virtual_keycode: Some(VirtualKeyCode::Back),
+                                    modifiers: ModifiersState::empty(),
+                                },
+                                is_synthetic: false,
+                            });
+                        }
+                        c => {
+                            egui_glow.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
+                        }
+                    }
+                } else {
+                    egui_glow.on_event(&event);
                 }
-
-                egui_glow.on_event(&event);
-
                 display.window().request_redraw();
             }
             _ => {}

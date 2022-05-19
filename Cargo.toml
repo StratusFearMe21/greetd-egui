@@ -17,6 +17,7 @@ rand = "0.8.5"
 glutin = { git = "https://github.com/StratusFearMe21/glutin" }
 libmpv = { git = "https://github.com/StratusFearMe21/libmpv-rs" }
 infer = "0.8.0"
+calloop = "0.9.3"
 
 [patch.crates-io]
 winit = { git = "https://github.com/StratusFearMe21/winit" }

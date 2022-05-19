@@ -561,6 +561,7 @@ dependencies = [
 name = "eguigreeter"
 version = "0.1.0"
 dependencies = [
+ "calloop",
  "clap 3.1.18",
  "crossterm",
  "egui",
