@@ -40,6 +40,11 @@ fn main() {
                 .short('u')
                 .value_hint(clap::ValueHint::Username)
                 .help("Autofill your own username on a single user computer"),
+            Arg::new("session")
+                .long("session")
+                .short('s')
+                .value_hint(clap::ValueHint::Other)
+                .help("Sets the default session for this login"),
         ])
         .get_matches();
     let mut event_loop: glutin::event_loop::EventLoop<char> =
@@ -159,7 +164,15 @@ fn main() {
             })
         })
         .collect();
-    let mut current_env = &environments[0];
+    let mut current_env_index = if let Some(session) = command.value_of("session") {
+        environments
+            .iter()
+            .position(|f| f.name == Cow::Borrowed(session))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut current_env = &environments[current_env_index];
     let mut pending_focus = true;
     let mut auth_message = String::new();
     let mut auth_message_type: Option<AuthMessageType> = None;
@@ -279,13 +292,7 @@ fn main() {
                                 }
                             });
 
-                            egui::ComboBox::from_label("Session")
-                                .selected_text(current_env.name.as_ref())
-                                .show_ui(ui, |ui| {
-                                    for i in &environments {
-                                        ui.selectable_value(&mut current_env, i, i.name.as_ref());
-                                    }
-                                });
+                            ui.label(format!("Session: < {} >", current_env.name));
                         });
                 });
 
@@ -362,6 +369,24 @@ fn main() {
                         }
                         pending_focus = true;
                     }
+                    '>' => {
+                        current_env_index += 1;
+                        if let Some(env) = environments.get(current_env_index) {
+                            current_env = env
+                        } else {
+                            current_env_index = 0;
+                            current_env = &environments[current_env_index];
+                        }
+                    }
+                    '<' => {
+                        current_env_index -= 1;
+                        if let Some(env) = environments.get(current_env_index) {
+                            current_env = env
+                        } else {
+                            current_env_index = environments.len() - 1;
+                            current_env = &environments[current_env_index];
+                        }
+                    }
                     '\x7F' => {
                         egui_glium.on_event(&glutin::event::WindowEvent::KeyboardInput {
                             device_id: unsafe { DeviceId::dummy() },
@@ -384,9 +409,10 @@ fn main() {
                             is_synthetic: false,
                         });
                     }
-                    _ => {}
+                    c => {
+                        egui_glium.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
+                    }
                 }
-                egui_glium.on_event(&glutin::event::WindowEvent::ReceivedCharacter(c));
 
                 display.gl_window().window().request_redraw();
             }
