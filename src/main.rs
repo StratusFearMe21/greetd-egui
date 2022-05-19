@@ -2,10 +2,8 @@ use std::{
     borrow::Cow,
     ffi::c_void,
     io::{Read, Stdin, Write},
-    os::unix::{
-        net::UnixStream,
-        prelude::{AsRawFd, FromRawFd},
-    },
+    ops::{Deref, DerefMut},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -19,7 +17,10 @@ use greetd_ipc::{codec::SyncCodec, AuthMessageType, ErrorType, Response};
 use glutin::{
     event::{DeviceId, ModifiersState, VirtualKeyCode},
     event_loop::ControlFlow,
-    platform::{run_return::EventLoopExtRunReturn, unix::EventLoopWindowTargetExtUnix},
+    platform::{
+        run_return::EventLoopExtRunReturn,
+        unix::{EventLoopWindowTargetExtUnix, WindowExtUnix},
+    },
     window::{Window, WindowId},
     ContextWrapper, PossiblyCurrent,
 };
@@ -46,6 +47,31 @@ pub fn get_proc_address(
     name: &str,
 ) -> *mut c_void {
     display.get_proc_address(name) as *mut c_void
+}
+
+pub struct GreetdSock(pub UnixStream, pub bool);
+
+impl Drop for GreetdSock {
+    fn drop(&mut self) {
+        if !self.1 {
+            let len: u32 = "{\"type\":\"cancel_session\"}".len() as u32;
+            self.write_all(&len.to_ne_bytes()).unwrap();
+            self.write_all(b"{\"type\":\"cancel_session\"}").unwrap();
+        }
+    }
+}
+
+impl Deref for GreetdSock {
+    type Target = UnixStream;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for GreetdSock {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 fn main() {
@@ -119,23 +145,27 @@ fn main() {
                 f.set_property("keep-open", true)?;
             } else {
                 f.set_property("audio", false)?;
-                f.set_property("hwdec", "auto-safe")?;
                 f.set_property("loop-file", true)?;
             }
             f.set_property("panscan", 1.0)
         })
         .ok()?;
-        let mut render_context = RenderContext::new(
-            unsafe { mpv.ctx.as_mut() },
-            vec![
-                RenderParam::ApiType(RenderParamApiType::OpenGl),
-                RenderParam::InitParams(OpenGLInitParams {
-                    get_proc_address,
-                    ctx: display.clone(),
-                }),
-            ],
-        )
-        .ok()?;
+        if Path::new("/etc/mpv/mpv.conf").exists() {
+            mpv.load_config("/etc/mpv/mpv.conf").ok()?;
+        }
+        let mut params = vec![
+            RenderParam::ApiType(RenderParamApiType::OpenGl),
+            RenderParam::InitParams(OpenGLInitParams {
+                get_proc_address,
+                ctx: display.clone(),
+            }),
+        ];
+        if let Some(display) = event_loop.wayland_display() {
+            params.push(RenderParam::WaylandDisplay(display as _));
+        } else if let Some(display) = display.window().xlib_display() {
+            params.push(RenderParam::X11Display(display as _));
+        }
+        let mut render_context = RenderContext::new(unsafe { mpv.ctx.as_mut() }, params).ok()?;
         mpv.event_context_mut().disable_deprecated_events().unwrap();
         let event_proxy = event_loop.create_proxy();
         render_context.set_update_callback(move || {
@@ -147,7 +177,10 @@ fn main() {
         Some((Some(render_context), mpv))
     }();
 
-    let mut stream = UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap();
+    let mut stream = GreetdSock(
+        UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap(),
+        false,
+    );
 
     let mut pending_message = false;
     let mut focused = FocusedField::Username;
@@ -230,10 +263,9 @@ fn main() {
     let mut auth_message_type: Option<AuthMessageType> = None;
     let mut password = String::new();
     let mut window_title = Cow::Borrowed("Login");
-    let mut card_fd = None;
-    event_loop.run_return(|event, target, control_flow| {
+    event_loop.run_return(|event, _, control_flow| {
         if pending_message {
-            match Response::read_from(&mut stream).unwrap() {
+            match Response::read_from(stream.deref_mut()).unwrap() {
                 Response::AuthMessage {
                     auth_message_type: at,
                     auth_message: am,
@@ -243,11 +275,30 @@ fn main() {
                     pending_message = false;
                 }
                 Response::Success => {
-                    if let Some(drm) = target.drm_device() {
-                        card_fd = Some(drm.as_raw_fd());
+                    if stream.1 {
+                        *control_flow = ControlFlow::Exit;
+                        pending_message = false;
+                    } else {
+                        stream
+                            .write_all(
+                                &(("{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\
+               \"\"]}"
+                                    .len()
+                                    + current_env.exec.len())
+                                    as u32)
+                                    .to_ne_bytes(),
+                            )
+                            .unwrap();
+                        stream
+                            .write_fmt(format_args!(
+                                "{{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\
+            \"{}\"]}}",
+                                current_env.exec
+                            ))
+                            .unwrap();
+                        stream.1 = true;
+                        pending_message = true;
                     }
-                    *control_flow = ControlFlow::Exit;
-                    pending_message = false;
                 }
                 Response::Error {
                     error_type,
@@ -256,15 +307,14 @@ fn main() {
                     ErrorType::Error => window_title = Cow::Owned(description),
                     ErrorType::AuthError => {
                         window_title = Cow::Borrowed("Login failed");
-                        let len: u32 = "{\"type\":\"cancel_session\"}".len() as u32;
-                        stream.write_all(&len.to_ne_bytes()).unwrap();
-                        stream.write_all(b"{\"type\":\"cancel_session\"}").unwrap();
-                        pending_message = true;
-                        stream =
-                            UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap();
+                        stream = GreetdSock(
+                            UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap(),
+                            false,
+                        );
                         focused = FocusedField::Username;
                         username.clear();
                         password.clear();
+                        pending_message = true;
 
                         if let Some(defaults) = command.value_of("username") {
                             username = defaults.to_string();
@@ -285,10 +335,12 @@ fn main() {
         }
         match event {
             glutin::event::Event::LoopDestroyed => {
+                crossterm::terminal::disable_raw_mode().unwrap();
                 egui_glow.destroy();
                 if let Some(v) = &mut vid {
                     v.0.take();
                 }
+                vid.take();
             }
             glutin::event::Event::RedrawRequested(_) => {
                 let needs_repaint = egui_glow.run(display.window(), |ctx| {
@@ -477,6 +529,7 @@ fn main() {
                             }
                         }
                         '\x7F' => {
+                            #[allow(deprecated)]
                             egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
                                 device_id: unsafe { DeviceId::dummy() },
                                 input: glutin::event::KeyboardInput {
@@ -487,6 +540,7 @@ fn main() {
                                 },
                                 is_synthetic: false,
                             });
+                            #[allow(deprecated)]
                             egui_glow.on_event(&glutin::event::WindowEvent::KeyboardInput {
                                 device_id: unsafe { DeviceId::dummy() },
                                 input: glutin::event::KeyboardInput {
@@ -510,28 +564,6 @@ fn main() {
             _ => {}
         }
     });
-    drop(event_loop);
-    drop(display);
-    drop(egui_glow);
-    if let Some(fd) = card_fd {
-        drop(unsafe { std::fs::File::from_raw_fd(fd) });
-    }
-    stream
-        .write_all(
-            &(("{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"\"]}".len()
-                + current_env.exec.len()) as u32)
-                .to_ne_bytes(),
-        )
-        .unwrap();
-    stream
-        .write_fmt(format_args!(
-            "{{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\"{}\"]}}",
-            current_env.exec
-        ))
-        .unwrap();
-    if let Response::Success = Response::read_from(&mut stream).unwrap() {
-        return;
-    }
 }
 
 #[derive(PartialEq, Eq)]

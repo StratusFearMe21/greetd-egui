@@ -14,7 +14,7 @@ freedesktop-desktop-entry = "0.5.0"
 glow = "0.11.2"
 greetd_ipc = { version = "0.8.0", features = ["sync-codec"] }
 rand = "0.8.5"
-glutin = { git = "https://github.com/StratusFearMe21/glutin" }
+glutin = { git = "https://github.com/StratusFearMe21/glutin", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "kms"] }
 libmpv = { git = "https://github.com/StratusFearMe21/libmpv-rs" }
 infer = "0.8.0"
 calloop = "0.9.3"
