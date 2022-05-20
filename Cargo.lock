@@ -569,7 +569,7 @@ dependencies = [
  "freedesktop-desktop-entry",
  "glow",
  "glutin",
- "greetd_ipc",
+ "greetd_client",
  "infer",
  "libmpv",
  "rand",
@@ -798,14 +798,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "greetd_ipc"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80ef4898e4031d4a6133082ec838df029bfe33ae6c74a55c575e363576cc4cb7"
+name = "greetd_client"
+version = "0.1.0"
+source = "git+https://github.com/StratusFearMe21/greetd_client#94dbd99321047d4c559c23a1c94dfda7a4dae072"
 dependencies = [
+ "calloop",
+ "parking_lot",
  "serde",
  "serde_json",
- "thiserror",
+ "writeable",
 ]
 
 [[package]]
@@ -2044,6 +2045,12 @@ dependencies = [
  "x11-dl",
  "xkbcommon",
 ]
+
+[[package]]
+name = "writeable"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae065fb2b24446a45c2bea0fe256b4ca54032661ee72d2500aaadeeec41b8e4e"
 
 [[package]]
 name = "x11-dl"

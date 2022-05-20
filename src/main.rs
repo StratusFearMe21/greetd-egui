@@ -1,9 +1,8 @@
 use std::{
     borrow::Cow,
+    cell::RefCell,
     ffi::c_void,
-    io::{Read, Stdin, Write},
-    ops::{Deref, DerefMut},
-    os::unix::net::UnixStream,
+    io::{Read, Stdin},
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -12,7 +11,7 @@ use calloop::{Interest, PostAction};
 use clap::Arg;
 use egui::{Align2, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
-use greetd_ipc::{codec::SyncCodec, AuthMessageType, ErrorType, Response};
+use greetd_client::{AuthMessageType, ErrorType, Greetd, GreetdSource, Response};
 
 use glutin::{
     event::{DeviceId, ModifiersState, VirtualKeyCode},
@@ -47,31 +46,6 @@ pub fn get_proc_address(
     name: &str,
 ) -> *mut c_void {
     display.get_proc_address(name) as *mut c_void
-}
-
-pub struct GreetdSock(pub UnixStream, pub bool);
-
-impl Drop for GreetdSock {
-    fn drop(&mut self) {
-        if !self.1 {
-            let len: u32 = "{\"type\":\"cancel_session\"}".len() as u32;
-            self.write_all(&len.to_ne_bytes()).unwrap();
-            self.write_all(b"{\"type\":\"cancel_session\"}").unwrap();
-        }
-    }
-}
-
-impl Deref for GreetdSock {
-    type Target = UnixStream;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for GreetdSock {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
 }
 
 fn main() {
@@ -177,27 +151,15 @@ fn main() {
         Some((Some(render_context), mpv))
     }();
 
-    let mut stream = GreetdSock(
-        UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap(),
-        false,
-    );
+    let mut stream = Greetd::new().unwrap();
+    let response_queue = Rc::new(RefCell::new(Vec::new()));
 
-    let mut pending_message = false;
     let mut focused = FocusedField::Username;
     let mut username = String::new();
 
     if let Some(defaults) = command.value_of("username") {
         username = defaults.to_string();
-        let len: u32 =
-            ("{\"type\":\"create_session\",\"username\":\"\"}".len() + username.len()) as u32;
-        stream.write_all(&len.to_ne_bytes()).unwrap();
-        stream
-            .write_fmt(format_args!(
-                "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
-                username
-            ))
-            .unwrap();
-        pending_message = true;
+        stream.create_session(username.clone()).unwrap();
         focused = FocusedField::Password;
     }
 
@@ -217,7 +179,7 @@ fn main() {
                 let mut b = [0x00];
                 if let Err(_) = stdin.read_exact(&mut b) {
                     crossterm::terminal::disable_raw_mode().unwrap();
-                    std::process::exit(1);
+                    return Ok(PostAction::Remove);
                 }
                 shared_data.push(glutin::event::Event::WindowEvent {
                     window_id: unsafe { WindowId::dummy() },
@@ -228,6 +190,18 @@ fn main() {
         );
 
         handle.register_dispatcher(stdin_dispatcher).unwrap();
+
+        let rq = response_queue.clone();
+
+        let stream_dispatcher: calloop::Dispatcher<
+            'static,
+            GreetdSource,
+            Vec<glutin::event::Event<'static, ()>>,
+        > = calloop::Dispatcher::new(stream.event_source(), move |event, _, _| {
+            rq.borrow_mut().push(event);
+        });
+
+        handle.register_dispatcher(stream_dispatcher).unwrap();
     }
 
     let environments_raw: Vec<(String, PathBuf)> = freedesktop_desktop_entry::Iter::new(vec![
@@ -264,41 +238,30 @@ fn main() {
     let mut password = String::new();
     let mut window_title = Cow::Borrowed("Login");
     event_loop.run_return(|event, _, control_flow| {
-        if pending_message {
-            match Response::read_from(stream.deref_mut()).unwrap() {
+        for i in response_queue.borrow_mut().drain(..) {
+            match dbg!(i) {
                 Response::AuthMessage {
                     auth_message_type: at,
                     auth_message: am,
                 } => {
                     auth_message = am;
                     auth_message_type = Some(at);
-                    pending_message = false;
+                    if let Some(AuthMessageType::Info) | Some(AuthMessageType::Error) =
+                        auth_message_type
+                    {
+                        stream.authentication_response(None).unwrap();
+                    }
+                }
+                Response::Finish => {
+                    *control_flow = ControlFlow::Exit;
                 }
                 Response::Success => {
-                    if stream.1 {
-                        *control_flow = ControlFlow::Exit;
-                        pending_message = false;
-                    } else {
-                        stream
-                            .write_all(
-                                &(("{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\
-               \"\"]}"
-                                    .len()
-                                    + current_env.exec.len())
-                                    as u32)
-                                    .to_ne_bytes(),
-                            )
-                            .unwrap();
-                        stream
-                            .write_fmt(format_args!(
-                                "{{\"type\":\"start_session\",\"cmd\":[\"/etc/ly/wsetup.sh\",\
-            \"{}\"]}}",
-                                current_env.exec
-                            ))
-                            .unwrap();
-                        stream.1 = true;
-                        pending_message = true;
-                    }
+                    stream
+                        .start_session(vec![
+                            "/etc/ly/wsetup.sh".to_string(),
+                            current_env.exec.to_string(),
+                        ])
+                        .unwrap();
                 }
                 Response::Error {
                     error_type,
@@ -307,26 +270,14 @@ fn main() {
                     ErrorType::Error => window_title = Cow::Owned(description),
                     ErrorType::AuthError => {
                         window_title = Cow::Borrowed("Login failed");
-                        stream = GreetdSock(
-                            UnixStream::connect(std::env::var("GREETD_SOCK").unwrap()).unwrap(),
-                            false,
-                        );
+                        stream.cancel_session().unwrap();
                         focused = FocusedField::Username;
                         username.clear();
                         password.clear();
-                        pending_message = true;
 
                         if let Some(defaults) = command.value_of("username") {
                             username = defaults.to_string();
-                            let len: u32 = ("{\"type\":\"create_session\",\"username\":\"\"}".len()
-                                + username.len()) as u32;
-                            stream.write_all(&len.to_ne_bytes()).unwrap();
-                            stream
-                                .write_fmt(format_args!(
-                                    "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
-                                    username
-                                ))
-                                .unwrap();
+                            stream.create_session(username.clone()).unwrap();
                             focused = FocusedField::Password;
                         }
                     }
@@ -373,21 +324,7 @@ fn main() {
                                     Some(AuthMessageType::Secret) => {
                                         ui.add(TextEdit::singleline(&mut password).password(true))
                                     }
-                                    Some(_) => {
-                                        stream
-                                            .write_all(
-                                                &("{\"type\":\"post_auth_message_response\"}".len()
-                                                    as u32)
-                                                    .to_ne_bytes(),
-                                            )
-                                            .unwrap();
-                                        stream
-                                            .write_all(b"{\"type\":\"post_auth_message_response\"}")
-                                            .unwrap();
-                                        pending_message = true;
-                                        return;
-                                    }
-                                    None => return,
+                                    _ => return,
                                 };
                                 if pending_focus {
                                     if let FocusedField::Password = focused {
@@ -466,40 +403,14 @@ fn main() {
                                     focused = FocusedField::Username;
                                 } else {
                                     stream
-                                        .write_all(
-                                            &(("{\"type\":\"post_auth_message_response\",\"\
-                                                    response\":\"\"}"
-                                                .len()
-                                                + password.len())
-                                                as u32)
-                                                .to_ne_bytes(),
-                                        )
+                                        .authentication_response(Some(password.clone()))
                                         .unwrap();
-                                    stream
-                                        .write_fmt(format_args!(
-                                            "{{\"type\":\"post_auth_message_response\",\"\
-                                                 response\":\"{}\"}}",
-                                            password
-                                        ))
-                                        .unwrap();
-                                    pending_message = true;
                                 }
                                 pending_focus = true;
                             }
                             FocusedField::Username => {
-                                let len: u32 = ("{\"type\":\"create_session\",\"username\":\"\"}"
-                                    .len()
-                                    + username.len())
-                                    as u32;
-                                stream.write_all(&len.to_ne_bytes()).unwrap();
-                                stream
-                                    .write_fmt(format_args!(
-                                        "{{\"type\":\"create_session\",\"username\":\"{}\"}}",
-                                        username
-                                    ))
-                                    .unwrap();
+                                stream.create_session(username.clone()).unwrap();
                                 focused = FocusedField::Password;
-                                pending_message = true;
                                 pending_focus = true;
                             }
                         },
