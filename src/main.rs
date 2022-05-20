@@ -2,7 +2,8 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     ffi::c_void,
-    io::{Read, Stdin},
+    io::Read,
+    os::unix::prelude::FromRawFd,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -159,19 +160,22 @@ fn main() {
 
     if let Some(defaults) = command.value_of("username") {
         username = defaults.to_string();
-        stream.create_session(username.clone()).unwrap();
+        stream.create_session(&username).unwrap();
         focused = FocusedField::Password;
     }
 
     crossterm::terminal::enable_raw_mode().unwrap();
 
     if let Some(handle) = event_loop.drm_calloop_handle() {
-        let stdin_source =
-            calloop::generic::Generic::new(std::io::stdin(), Interest::READ, calloop::Mode::Level);
+        let stdin_source = calloop::generic::Generic::new(
+            unsafe { std::fs::File::from_raw_fd(0) },
+            Interest::READ,
+            calloop::Mode::Level,
+        );
 
         let stdin_dispatcher: calloop::Dispatcher<
             'static,
-            calloop::generic::Generic<Stdin>,
+            calloop::generic::Generic<std::fs::File>,
             Vec<glutin::event::Event<'static, ()>>,
         > = calloop::Dispatcher::new(
             stdin_source,
@@ -239,7 +243,7 @@ fn main() {
     let mut window_title = Cow::Borrowed("Login");
     event_loop.run_return(|event, _, control_flow| {
         for i in response_queue.borrow_mut().drain(..) {
-            match dbg!(i) {
+            match i {
                 Response::AuthMessage {
                     auth_message_type: at,
                     auth_message: am,
@@ -257,10 +261,7 @@ fn main() {
                 }
                 Response::Success => {
                     stream
-                        .start_session(vec![
-                            "/etc/ly/wsetup.sh".to_string(),
-                            current_env.exec.to_string(),
-                        ])
+                        .start_session(&["/etc/ly/wsetup.sh", current_env.exec])
                         .unwrap();
                 }
                 Response::Error {
@@ -277,7 +278,7 @@ fn main() {
 
                         if let Some(defaults) = command.value_of("username") {
                             username = defaults.to_string();
-                            stream.create_session(username.clone()).unwrap();
+                            stream.create_session(&username).unwrap();
                             focused = FocusedField::Password;
                         }
                     }
@@ -402,14 +403,12 @@ fn main() {
                                 if username.is_empty() {
                                     focused = FocusedField::Username;
                                 } else {
-                                    stream
-                                        .authentication_response(Some(password.clone()))
-                                        .unwrap();
+                                    stream.authentication_response(Some(&password)).unwrap();
                                 }
                                 pending_focus = true;
                             }
                             FocusedField::Username => {
-                                stream.create_session(username.clone()).unwrap();
+                                stream.create_session(&username).unwrap();
                                 focused = FocusedField::Password;
                                 pending_focus = true;
                             }
