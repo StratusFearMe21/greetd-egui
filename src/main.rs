@@ -235,7 +235,7 @@ fn main() {
             if rs.is_some() {
                 panic!("Multiple events cannot be in the queue at once");
             } else {
-                *rs = Some(dbg!(event));
+                *rs = Some(event);
             }
         });
 
@@ -276,9 +276,6 @@ fn main() {
     let mut password = String::new();
     let mut window_title = Cow::Borrowed("Login");
     event_loop.run_return(|event, _, control_flow| {
-        if *control_flow == ControlFlow::Exit {
-            eprintln!("Exit");
-        }
         if let Some(i) = response_queue.borrow_mut().take() {
             match i {
                 Response::AuthMessage {
@@ -525,7 +522,6 @@ fn main() {
             _ => {}
         }
     });
-    eprintln!("Returned");
 }
 
 #[derive(PartialEq, Eq)]
