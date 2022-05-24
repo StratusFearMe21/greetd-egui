@@ -10,7 +10,7 @@ use std::{
 
 use calloop::{Interest, PostAction};
 use clap::Arg;
-use egui::{Align2, TextEdit};
+use egui::{Align2, Color32, RichText, TextEdit};
 use freedesktop_desktop_entry::DesktopEntry;
 use greetd_client::{AuthMessageType, ErrorType, Greetd, GreetdSource, Response};
 
@@ -30,6 +30,11 @@ use libmpv::{
     FileState, Mpv,
 };
 use rand::prelude::IteratorRandom;
+use time::{
+    format_description::modifier::{Hour, Minute},
+    UtcOffset,
+};
+use tz::TimeZone;
 
 #[derive(PartialEq)]
 struct StrippedEntry<'a> {
@@ -121,6 +126,7 @@ fn main() {
             } else {
                 f.set_property("audio", false)?;
                 f.set_property("loop-file", true)?;
+                f.set_property("hwdec", "auto-safe")?;
             }
             f.set_property("panscan", 1.0)
         })
@@ -153,7 +159,7 @@ fn main() {
     }();
 
     let mut stream = Greetd::new().unwrap();
-    let response_queue = Rc::new(RefCell::new(Vec::new()));
+    let response_queue = Rc::new(RefCell::new(None));
 
     let mut focused = FocusedField::Username;
     let mut username = String::new();
@@ -165,6 +171,29 @@ fn main() {
     }
 
     crossterm::terminal::enable_raw_mode().unwrap();
+
+    let timezone = TimeZone::local().unwrap();
+    let offset = timezone.find_current_local_time_type().unwrap().ut_offset();
+    let current_time =
+        time::OffsetDateTime::now_utc().to_offset(UtcOffset::from_whole_seconds(offset).unwrap());
+    let clock = current_time
+        .format(
+            [
+                time::format_description::FormatItem::Component(
+                    time::format_description::Component::Hour({
+                        let mut h = Hour::default();
+                        h.is_12_hour_clock = true;
+                        h
+                    }),
+                ),
+                time::format_description::FormatItem::Literal(b":"),
+                time::format_description::FormatItem::Component(
+                    time::format_description::Component::Minute(Minute::default()),
+                ),
+            ]
+            .as_ref(),
+        )
+        .unwrap_or_else(|_| "??:??".to_string());
 
     if let Some(handle) = event_loop.drm_calloop_handle() {
         let stdin_source = calloop::generic::Generic::new(
@@ -202,7 +231,12 @@ fn main() {
             GreetdSource,
             Vec<glutin::event::Event<'static, ()>>,
         > = calloop::Dispatcher::new(stream.event_source(), move |event, _, _| {
-            rq.borrow_mut().push(event);
+            let mut rs = rq.borrow_mut();
+            if rs.is_some() {
+                panic!("Multiple events cannot be in the queue at once");
+            } else {
+                *rs = Some(dbg!(event));
+            }
         });
 
         handle.register_dispatcher(stream_dispatcher).unwrap();
@@ -242,7 +276,10 @@ fn main() {
     let mut password = String::new();
     let mut window_title = Cow::Borrowed("Login");
     event_loop.run_return(|event, _, control_flow| {
-        for i in response_queue.borrow_mut().drain(..) {
+        if *control_flow == ControlFlow::Exit {
+            eprintln!("Exit");
+        }
+        if let Some(i) = response_queue.borrow_mut().take() {
             match i {
                 Response::AuthMessage {
                     auth_message_type: at,
@@ -255,6 +292,7 @@ fn main() {
                     {
                         stream.authentication_response(None).unwrap();
                     }
+                    display.window().request_redraw();
                 }
                 Response::Finish => {
                     *control_flow = ControlFlow::Exit;
@@ -267,22 +305,26 @@ fn main() {
                 Response::Error {
                     error_type,
                     description,
-                } => match error_type {
-                    ErrorType::Error => window_title = Cow::Owned(description),
-                    ErrorType::AuthError => {
-                        window_title = Cow::Borrowed("Login failed");
-                        stream.cancel_session().unwrap();
-                        focused = FocusedField::Username;
-                        username.clear();
-                        password.clear();
+                } => {
+                    match error_type {
+                        ErrorType::Error => window_title = Cow::Owned(description),
+                        ErrorType::AuthError => {
+                            window_title = Cow::Borrowed("Login failed");
+                            focused = FocusedField::Username;
+                            pending_focus = true;
+                            auth_message_type = None;
+                            username.clear();
+                            password.clear();
 
-                        if let Some(defaults) = command.value_of("username") {
-                            username = defaults.to_string();
-                            stream.create_session(&username).unwrap();
-                            focused = FocusedField::Password;
+                            if let Some(defaults) = command.value_of("username") {
+                                username = defaults.to_string();
+                                stream.create_session(&username).unwrap();
+                                focused = FocusedField::Password;
+                            }
                         }
                     }
-                },
+                    display.window().request_redraw();
+                }
             }
         }
         match event {
@@ -296,6 +338,16 @@ fn main() {
             }
             glutin::event::Event::RedrawRequested(_) => {
                 let needs_repaint = egui_glow.run(display.window(), |ctx| {
+                    egui::Window::new("")
+                        .title_bar(false)
+                        .auto_sized()
+                        .collapsible(false)
+                        .anchor(Align2::RIGHT_TOP, (-5.0, 5.0))
+                        .show(ctx, |ui| {
+                            ui.add(egui::Label::new(
+                                RichText::new(&clock).size(48.0).color(Color32::WHITE),
+                            ));
+                        });
                     egui::Window::new(window_title.as_ref())
                         .auto_sized()
                         .collapsible(false)
@@ -351,7 +403,6 @@ fn main() {
                 {
                     unsafe {
                         use glow::HasContext as _;
-                        gl.clear_color(0.0, 0.0, 0.0, 1.0);
                         gl.clear(glow::COLOR_BUFFER_BIT);
                     }
 
@@ -474,6 +525,7 @@ fn main() {
             _ => {}
         }
     });
+    eprintln!("Returned");
 }
 
 #[derive(PartialEq, Eq)]

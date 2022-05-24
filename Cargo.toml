@@ -12,12 +12,14 @@ egui = "0.18.1"
 egui_glow = { version = "0.18.1", features = ["winit"] }
 freedesktop-desktop-entry = "0.5.0"
 glow = "0.11.2"
-greetd_client = { git = "https://github.com/StratusFearMe21/greetd_client" }
+greetd_client = { path = "../greetd_client"}
 rand = "0.8.5"
 glutin = { git = "https://github.com/StratusFearMe21/glutin", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "kms"] }
 libmpv = { git = "https://github.com/StratusFearMe21/libmpv-rs" }
 infer = "0.8.0"
 calloop = "0.9.3"
+time = { version = "0.3.9", features = ["local-offset", "formatting"] }
+tz-rs = "0.6.9"
 
 [patch.crates-io]
 winit = { git = "https://github.com/StratusFearMe21/winit" }

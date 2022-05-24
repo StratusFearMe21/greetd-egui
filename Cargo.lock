@@ -283,6 +283,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "const_fn"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbdcdcb6d86f71c5e97409ad45898af11cbc995b4ee8112d59095a28d376c935"
+
+[[package]]
 name = "core-foundation"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +579,8 @@ dependencies = [
  "infer",
  "libmpv",
  "rand",
+ "time",
+ "tz-rs",
 ]
 
 [[package]]
@@ -800,7 +808,6 @@ dependencies = [
 [[package]]
 name = "greetd_client"
 version = "0.1.0"
-source = "git+https://github.com/StratusFearMe21/greetd_client#4d2a54aefc3e291ed47381111cb888600c1d05a9"
 dependencies = [
  "calloop",
  "parking_lot",
@@ -1201,6 +1208,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2819ce041d2ee131036f4fc9d6ae7ae125a3a40e97ba64d04fe799ad9dabbb44"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1633,6 +1649,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "time"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2702e08a7a860f005826c6815dcac101b19b5eb330c27fe4a5928fec1d20ddd"
+dependencies = [
+ "itoa",
+ "libc",
+ "num_threads",
+]
+
+[[package]]
 name = "toml"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1678,6 +1705,15 @@ name = "ttf-parser"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c74c96594835e10fa545e2a51e8709f30b173a092bfd6036ef2cec53376244f3"
+
+[[package]]
+name = "tz-rs"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed700577df0503a291cb0eec06edeb4da3debd33d49cffa81c720112a6e51ca6"
+dependencies = [
+ "const_fn",
+]
 
 [[package]]
 name = "udev"
