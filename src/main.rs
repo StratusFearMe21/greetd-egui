@@ -276,7 +276,7 @@ fn main() {
     let mut password = String::new();
     let mut window_title = Cow::Borrowed("Login");
     event_loop.run_return(|event, _, control_flow| {
-        if let Some(i) = response_queue.borrow_mut().take() {
+        if let Some(i) = response_queue.take() {
             match i {
                 Response::AuthMessage {
                     auth_message_type: at,
