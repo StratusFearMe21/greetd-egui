@@ -210,7 +210,7 @@ fn main() {
             stdin_source,
             move |_, stdin, shared_data: &mut Vec<glutin::event::Event<'static, ()>>| {
                 let mut b = [0x00];
-                if let Err(_) = stdin.read_exact(&mut b) {
+                if stdin.read_exact(&mut b).is_err() {
                     crossterm::terminal::disable_raw_mode().unwrap();
                     return Ok(PostAction::Remove);
                 }
@@ -250,7 +250,7 @@ fn main() {
     .collect();
     let environments_serialized: Vec<DesktopEntry> = environments_raw
         .iter()
-        .filter_map(|(bytes, path)| DesktopEntry::decode(&path, &bytes).ok())
+        .filter_map(|(bytes, path)| DesktopEntry::decode(path, bytes).ok())
         .collect();
     let environments: Vec<StrippedEntry> = environments_serialized
         .iter()

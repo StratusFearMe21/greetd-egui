@@ -808,7 +808,7 @@ dependencies = [
 [[package]]
 name = "greetd_client"
 version = "0.1.0"
-source = "git+https://github.com/StratusFearMe21/greetd_client#4270178893ee594fd9733b1de9708d4188ff0dda"
+source = "git+https://github.com/StratusFearMe21/greetd_client#3eeaefb8c6939795ca722aff9472ea25f7a3f4f7"
 dependencies = [
  "calloop",
  "serde",
